@@ -1,0 +1,319 @@
+---
+title: "Desafio A3Data"
+author: "Felipe A. Petri"
+date: "`r Sys.Date()`"
+output: pdf_document
+header-includes:
+  - \usepackage{colortbl}
+  - \usepackage{xcolor}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,message=F,warning=F)
+```
+
+```{r pacotes}
+library(tidyverse)
+library(readxl)
+library(caret)
+library(ROSE)
+library(randomForest)
+library(kableExtra)
+```
+
+# Introdução das análises
+
+```{r Primeiras_manipulacoes}
+churn=read_xlsx("Customer-Churn.xlsx")
+head(churn)
+
+# Transformando variáveis categóricas em 0s e 1s (fica mais fácil para futura análise)
+churn=churn %>% 
+  mutate_at(c(4,5,7,8,10:15,17,21),~ifelse(.=="Yes",1,0))
+# Alterando tipos de colunas
+churn=churn %>% 
+  mutate_at(c(2:5,7:18,21),~as.factor(.))
+```
+
+## Introdução aos dados
+
+```{r results='asis'}
+churn[,c(1:10)] %>% 
+  summary() %>% 
+  kable(format="latex",escape=FALSE) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE,latex_options = c("HOLD_position","scale_down")) %>%
+  row_spec(0, bold = TRUE, background = "#D3D3D3")
+churn[,c(11:21)] %>% 
+  summary() %>% 
+  kable(format="latex",escape=FALSE) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE,latex_options = c("HOLD_position","scale_down")) %>%
+  row_spec(0, bold = TRUE, background = "#D3D3D3")
+```
+
+
+## Valores Faltantes
+
+```{r valores_valtantes}
+summary(churn)
+# Como temos apenas uma coluna com 11 dados faltantes podemos remover todos os dados faltantes
+churn=churn %>% 
+  drop_na()
+```
+
+## Verificando Balanceamento de Dados
+
+```{r}
+churn %>% 
+  ggplot(aes(Churn))+
+  geom_bar(fill="darkblue")+
+  labs(x="Churn",y="Frequência")+
+  theme_minimal()
+```
+
+Nossos dados não são balanceados
+
+## Treino e Teste
+
+```{r dividindo_em_treinoeteste}
+# Separando dados em treino e teste
+set.seed(1) 
+ind_treino <- sample(nrow(churn), 0.7 * nrow(churn))
+treino <- churn[ind_treino, ]
+teste <- churn[-ind_treino, ]
+```
+
+# Análise descritiva
+
+## Tabelas de contingência
+
+```{r tabelas_contingencia, results='asis'}
+contingencia=function(x){
+  table(treino$Churn,treino[,x][[1]])
+}
+categoricas=setdiff(names(treino)[sapply(treino, is.factor)], "Churn")
+tabelas_contingencia=lapply(categoricas,contingencia)
+names(tabelas_contingencia) <- paste("Churn", categoricas, sep = " x ")
+
+# Função para deixar as tabelas bonitas:
+beautiful_tabelas=function(tabela,nome){
+  tabela=addmargins(tabela)
+  rownames(tabela)[nrow(tabela)]="Total"
+  colnames(tabela)[ncol(tabela)]="Total"
+  tabela=kable(tabela,caption=paste("Tabela de Contingência de",nome), format = "latex") %>%
+    kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE,latex_options = "HOLD_position") %>%
+  row_spec(0, bold = TRUE, background = "#D3D3D3") %>%
+  column_spec(1, bold = TRUE, background = "#D3D3D3")
+  return(tabela)
+}
+
+# Plotando as tabelas bonitas:
+kables_contingencia=imap(tabelas_contingencia,beautiful_tabelas)
+for (i in 1:length(kables_contingencia)) {
+  cat(kables_contingencia[[i]], "\n\n")
+}
+```
+
+```{r plot_testes_quiquadrado}
+# Conduzindo teste estatístico para ver se as variáveis categóricas tem correlação com nossa variável de Churn
+testes=lapply(tabelas_contingencia,chisq.test)
+testes_df <- tibble(
+  Variaveis = names(testes),
+  Estatistica = map_dbl(testes, ~ .x$statistic),
+  P_valor = map_dbl(testes, ~ .x$p.value)
+)
+testes_df=testes_df %>% 
+  mutate(Var1=str_replace(Variaveis, "\\Qx \\E.*", ""),
+         Var2=str_replace(Variaveis, ".*?\\Qx \\E", "")) %>% 
+  select(-Variaveis)
+
+# Plotando os resultados dos testes estatísticos
+testes_df %>% 
+  ggplot(aes(x = Estatistica, y = reorder(Var2,desc(Estatistica)), fill = Estatistica)) +
+  geom_bar(stat="identity") +
+  geom_text(aes(label=paste0("P-valor: ",round(P_valor*100,2),"%"),
+                hjust=ifelse(Estatistica>500,1.1,-.1),
+                color=ifelse(P_valor>=.05,"red","black")),
+            size=3)+
+  scale_color_identity()+
+  scale_fill_gradient(low = "red", high = "green") +
+  labs(title="Testes estatísticos das variáveis Categóricas",
+       x = "Valor da Estatística do Teste",
+       y = "Variável") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+
+Podemos observar que as colunas gender e PhoneService não são correlacionadas com churn
+
+## Análise de variância
+
+```{r teste_numericas}
+numericas=names(treino)[sapply(treino, is.numeric)]
+teste_aov=aov(
+  eval(parse(text=paste0("cbind(",paste(numericas,collapse = ","),")")))~Churn,
+  data=treino
+)
+summary(teste_aov)
+```
+
+Todas as variáveis numéricas são correlacionadas com o churn
+
+# Modelo de Random Forest
+
+## Balanceando dados
+
+```{r}
+# Como temos dados não balanceados, vamos fazer um oversample no treino:
+freqs=summary(as.factor(treino$Churn))
+valor_oversample=freqs[1]-freqs[2]
+
+treino_over <- ovun.sample(Churn ~ ., data = treino, method = "over", N = nrow(treino)+valor_oversample)$data
+
+# Checando se oversample funcionou:
+treino_over %>% 
+  ggplot(aes(Churn))+
+  geom_bar(fill="darkblue")+
+  labs(x="Churn",y="Frequência")+
+  theme_minimal()
+```
+
+## Ajustando o modelo
+
+```{r random_forest}
+# Retirando variáveis que não iremos utilizar (sem correlação significativa)
+treino_over=treino_over %>% select(-c(customerID,gender,PhoneService))
+teste=teste %>% select(-c(customerID,gender,PhoneService))
+
+# Fazendo o modelo
+modelo_rf=randomForest(Churn~.,data=treino_over)
+
+pred <- predict(modelo_rf, newdata = teste)
+
+# Feature importance
+importancia <- modelo_rf$importance
+
+tibble(Variavel=rownames(importancia),Importancia=importancia) %>% 
+  ggplot(aes(reorder(Variavel,desc(Importancia)),Importancia))+
+  geom_bar(stat="identity",fill="darkblue")+
+  labs(x="",y="Importância")+
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+```
+
+## Verificando precisão do Random Forest
+
+```{r}
+confusao=table("Predito"=pred,"Observado"=teste$Churn)
+confusao=addmargins(confusao)
+rownames(confusao)[3]="Total"
+colnames(confusao)[3]="Total"
+kable(cbind("",confusao),caption="Matriz de Confusão") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE,latex_options = "HOLD_position") %>%
+  row_spec(0, bold = TRUE, background = "#D3D3D3") %>%
+  column_spec(1, bold = TRUE, background = "#D3D3D3") %>%
+  add_header_above(header = c("Predito","", "Observado"=2,""))
+```
+
+
+Com esse modelo nós seríamos capazes de identificar `r paste(round(confusao[2,2]*100/addmargins(confusao)[3,2],2),"%")` dos novos churns, sendo que consideraríamos `r paste(round(addmargins(confusao)[2,3]*100/addmargins(confusao)[3,3],2),"%")` dos clientes como churn, porém `r paste(round(confusao[2,1]*100/addmargins(confusao)[3,3],2),"%")` dos clientes seriam identificados como churn erroneamente.
+
+```{r}
+TP <- confusao[1, 1] 
+TN <- confusao[2, 2]
+FP <- confusao[2, 1]
+FN <- confusao[1, 2]
+
+# Calculando as métricas
+accuracy <- (TP + TN) / sum(confusao)         
+precision <- TP / (TP + FP)                       
+recall <- TP / (TP + FN)                           
+specificity <- TN / (TN + FP)                     
+f1_score <- 2 * (precision * recall) / (precision + recall)
+
+tabela_rf=tibble("Métrica"=c("Acurácia","Precisão","Recall","Especificidade","F1-Score"),
+       "Resultado"=paste(round(c(accuracy,precision,recall,specificity,f1_score)*100,2),"%"))
+```
+
+# Outros Modelos
+
+## XGBoost
+
+```{r}
+library(xgboost)
+treino_over=mutate_at(treino_over,c(1:3,5,7:12,14,18),~as.numeric(as.character(.)))
+teste=mutate_at(teste,c(1:3,5,7:12,14,18),~as.numeric(as.character(.)))
+
+treino_dummy <- model.matrix(~ . - 1, data = treino_over)
+treino_dummy=as.tibble(treino_dummy)
+teste_dummy <- model.matrix(~ . - 1, data = teste)
+teste_dummy=as.tibble(teste_dummy)
+
+treino_boost <- xgb.DMatrix(data = as.matrix(select(treino_dummy,-Churn)), label = treino_over$Churn)
+
+params <- list(
+  objective = "binary:logistic",
+  booster = "gbtree",
+  eval_metric = "logloss",
+  eta = 0.1,
+  max_depth = 50,
+  nrounds = 250
+)
+
+modelo_xgb <- xgboost(params = params, data = treino_boost, nrounds = params$nrounds,verbose = 0)
+teste_boost <- xgb.DMatrix(data = as.matrix(select(teste_dummy,-Churn)))
+pred_boost <- predict(modelo_xgb, teste_boost)
+
+library(pROC)
+auc_roc <- auc(roc(response = teste$Churn, predictor = pred_boost))
+auc_roc
+
+# Considerando threshold=0.5
+aprox_boost=ifelse(pred_boost>0.5,1,0)
+
+
+confusao_boost=table("Predito"=aprox_boost,"Observado"=teste$Churn)
+
+confusao_boost=addmargins(confusao_boost)
+rownames(confusao_boost)[3]="Total"
+colnames(confusao_boost)[3]="Total"
+kable(cbind("",confusao_boost),caption="Matriz de Confusão") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE,latex_options = "HOLD_position") %>%
+  row_spec(0, bold = TRUE, background = "#D3D3D3") %>%
+  column_spec(1, bold = TRUE, background = "#D3D3D3") %>%
+  add_header_above(header = c("Predito","", "Observado"=2,""))
+```
+
+Com esse modelo nós seríamos capazes de identificar `r paste(round(confusao[2,2]*100/addmargins(confusao)[3,2],2),"%")` dos novos churns, sendo que consideraríamos `r paste(round(addmargins(confusao)[2,3]*100/addmargins(confusao)[3,3],2),"%")` dos clientes como churn, porém `r paste(round(confusao[2,1]*100/addmargins(confusao)[3,3],2),"%")` dos clientes seriam identificados como churn erroneamente.
+
+```{r}
+TP <- confusao_boost[1, 1] 
+TN <- confusao_boost[2, 2]
+FP <- confusao_boost[2, 1]
+FN <- confusao_boost[1, 2]
+
+# Calculando as métricas
+accuracy <- (TP + TN) / sum(confusao_boost)         
+precision <- TP / (TP + FP)                       
+recall <- TP / (TP + FN)                           
+specificity <- TN / (TN + FP)                     
+f1_score <- 2 * (precision * recall) / (precision + recall)
+
+tabela_boost=tibble("Métrica"=c("Acurácia","Precisão","Recall","Especificidade","F1-Score"),
+       "Resultado"=paste(round(c(accuracy,precision,recall,specificity,f1_score)*100,2),"%"))
+```
+
+# Comparando performances
+
+```{r}
+tabela_rf %>%
+  kable(caption="Métricas de performance do Random Forest") %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE,latex_options = "HOLD_position") %>%
+  row_spec(0, bold = TRUE, background = "#D3D3D3") %>%
+  column_spec(1, bold = TRUE, background = "#D3D3D3")
+tabela_boost %>%
+  kable(caption="Métricas de performance do XGBoost") %>% 
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE,latex_options = "HOLD_position") %>%
+  row_spec(0, bold = TRUE, background = "#D3D3D3") %>%
+  column_spec(1, bold = TRUE, background = "#D3D3D3")
+```
