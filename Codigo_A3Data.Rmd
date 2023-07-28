@@ -38,6 +38,7 @@ churn=churn %>%
 ## Introdução aos dados
 
 ```{r results='asis'}
+options(knitr.kable.NA = '')
 churn[,c(1:10)] %>% 
   summary() %>% 
   kable(format="latex",escape=FALSE) %>%
@@ -140,7 +141,7 @@ testes_df %>%
        x = "Valor da Estatística do Teste",
        y = "Variável") +
   theme_minimal() +
-  theme(plot.title = element_text(hjust = 0.5))
+  theme(plot.title = element_text(hjust = 0.5),legend.position="none")
 ```
 
 
@@ -317,3 +318,70 @@ tabela_boost %>%
   row_spec(0, bold = TRUE, background = "#D3D3D3") %>%
   column_spec(1, bold = TRUE, background = "#D3D3D3")
 ```
+
+```{r plot_impacto_xgboost}
+churn %>% 
+  group_by(Churn) %>% 
+  summarise(n=n()) %>% 
+  mutate(prop=n/sum(n),
+         churns=c(221/1574,278/536)*prop) %>% 
+  ggplot(aes(prop*100,Churn))+
+  
+  geom_bar(stat="identity",aes(fill="Não Churn"))+
+  geom_text(aes(label=paste0(round((prop*100-churns*100)/prop,2),
+                            " %\n(",
+                            round((prop-churns)*n/prop),
+                            ")")),hjust=c(4,1.1),col="white",size=5)+
+  
+  geom_bar(stat="identity",aes(x=churns*100,fill="Churn"))+
+  geom_text(aes(x=churns*100,label=paste0(round(churns*100/prop,2),
+                                      " %\n(",
+                                      round(churns*n/prop),
+                                      ")")),hjust=c(1.1,1.4),col="white",size=5)+
+  
+  geom_text(aes(label=paste0("Total:\n",
+                             round(prop*100,2),
+                             " %\n(",
+                             round(n),
+                             ")")),col="black",size=5,hjust=-.1)+
+  
+  scale_fill_manual(values=c("Não Churn"="darkblue","Churn"="darkred"))+
+  expand_limits(x=c(0,80))+
+  theme_minimal()+
+  theme(legend.position="top")+
+  labs(x="Proporção",y="Churn Observado",fill="Predição do Modelo:")
+```
+
+```{r plot_impacto_rf}
+churn %>% 
+  group_by(Churn) %>% 
+  summarise(n=n()) %>% 
+  mutate(prop=n/sum(n),
+         churns=c(256/1574,308/536)*prop) %>% 
+  ggplot(aes(prop*100,Churn))+
+  
+  geom_bar(stat="identity",aes(fill="Não Churn"))+
+  geom_text(aes(label=paste0(round((prop*100-churns*100)/prop,2),
+                            " %\n(",
+                            round((prop-churns)*n/prop),
+                            ")")),hjust=c(4,1.1),col="white",size=5)+
+  
+  geom_bar(stat="identity",aes(x=churns*100,fill="Churn"))+
+  geom_text(aes(x=churns*100,label=paste0(round(churns*100/prop,2),
+                                      " %\n(",
+                                      round(churns*n/prop),
+                                      ")")),hjust=c(1.1,1.4),col="white",size=5)+
+  
+  geom_text(aes(label=paste0("Total:\n",
+                             round(prop*100,2),
+                             " %\n(",
+                             round(n),
+                             ")")),col="black",size=5,hjust=-.1)+
+  
+  scale_fill_manual(values=c("Não Churn"="darkblue","Churn"="darkred"))+
+  expand_limits(x=c(0,80))+
+  theme_minimal()+
+  theme(legend.position="top")+
+  labs(x="Proporção",y="Churn Observado",fill="Predição do Modelo:")
+```
+
